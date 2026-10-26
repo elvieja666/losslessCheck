@@ -1,0 +1,72 @@
+# ---------------------------------------------------------------------------
+#  GitHub compila Lossless Check en una Mac en la nube cada vez que subís
+#  cambios (o cuando tocás "Run workflow" en la pestaña Actions).
+#  El plugin terminado aparece en la sección "Releases" del repositorio.
+# ---------------------------------------------------------------------------
+name: Compilar Lossless Check
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  mac:
+    # Mac Intel: las de Apple Silicon (macos-14/15) suelen quedar sin lugar en GitHub.
+    # El plugin igual sale universal (Apple Silicon + Intel), lo define CMakeLists.txt.
+    runs-on: macos-15-intel
+    steps:
+      - name: Bajar el código
+        uses: actions/checkout@v4
+
+      - name: Configurar (descarga JUCE)
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DLOSSLESSCHECK_TESTS=ON
+
+      - name: Compilar
+        run: cmake --build build --config Release --target LosslessCheck_AU LosslessCheck_VST3 LosslessCheckTests -j 4
+
+      - name: Pruebas automáticas (si algo falla, no se publica)
+        run: ./build/LosslessCheckTests_artefacts/Release/LosslessCheckTests
+
+      - name: Firmar y empaquetar
+        run: |
+          set -e
+          ART="build/LosslessCheck_artefacts/Release"
+          mkdir -p salida
+          cp -R "$ART/AU/Lossless Check.component" salida/
+          cp -R "$ART/VST3/Lossless Check.vst3" salida/
+          codesign --force --deep -s - "salida/Lossless Check.component"
+          codesign --force --deep -s - "salida/Lossless Check.vst3"
+          cp instalar.command salida/
+          cp Resources/Fonts/OFL.txt "salida/Licencia letra Inter (OFL).txt"
+          chmod +x salida/instalar.command
+          cd salida
+          ditto -c -k --sequesterRsrc . ../LosslessCheck-mac.zip
+
+      - name: Validar el Audio Unit (igual que Logic)
+        continue-on-error: true
+        run: |
+          killall -9 AudioComponentRegistrar || true
+          sleep 2
+          auval -v aufx Lsck Ms06 | tail -5
+
+      - name: Publicar en Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # La versión sale de CMakeLists.txt (project(LosslessCheck VERSION x.y.z ...)).
+          VERSION=$(sed -n 's/^project(LosslessCheck VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          echo "Versión: $VERSION"
+          gh release delete ultima --cleanup-tag -y || true
+          gh release create ultima LosslessCheck-mac.zip \
+            --title "Lossless Check $VERSION (última versión)" \
+            --notes "Versión $VERSION. Bajá LosslessCheck-mac.zip y seguí el paso 3 del LEEME para instalarlo." \
+            --target "$GITHUB_SHA"
+
+      - name: Guardar también como artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: LosslessCheck-mac
+          path: LosslessCheck-mac.zip
